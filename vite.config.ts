@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   root: ".",
-  base: "/mobile/",
+  base: "/chatui/",
   server: {
     port: 5173,
   },
