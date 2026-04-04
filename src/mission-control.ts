@@ -1,5 +1,5 @@
 import { LitElement, html, nothing } from "lit";
-import { customElement, state } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 
 interface MissionControlEvent {
   id?: number | string;
@@ -79,6 +79,8 @@ const DEFAULT_PAGINATION: PaginationMeta = {
 
 @customElement("mission-control-view")
 export class MissionControlView extends LitElement {
+  @property({ type: String }) gatewayUrl = "";
+
   @state() private loading = false;
   @state() private tasks: MissionControlTask[] = [];
   @state() private dbPath = "-";
@@ -101,7 +103,7 @@ export class MissionControlView extends LitElement {
   @state() private dateToTime = "";
   @state() private outcomeFilter: "all" | "success" | "failed" = "all";
 
-  private readonly apiUrl = "/api/mission-control/logs";
+  private readonly apiPath = "/api/mission-control/logs";
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private openDetails = new Set<string>();
 
@@ -142,8 +144,28 @@ export class MissionControlView extends LitElement {
     }
   }
 
+  private resolveApiOrigin() {
+    const raw = this.gatewayUrl.trim();
+    if (!raw) return window.location.origin;
+
+    let normalized = raw;
+    if (normalized.startsWith("ws://")) {
+      normalized = normalized.replace("ws://", "http://");
+    } else if (normalized.startsWith("wss://")) {
+      normalized = normalized.replace("wss://", "https://");
+    } else if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
+      normalized = `https://${normalized}`;
+    }
+
+    try {
+      return new URL(normalized).origin;
+    } catch {
+      return window.location.origin;
+    }
+  }
+
   private buildRequestUrl() {
-    const url = new URL(this.apiUrl, window.location.origin);
+    const url = new URL(this.apiPath, this.resolveApiOrigin());
     url.searchParams.set("page", String(this.pagination.page));
     url.searchParams.set("pageSize", String(this.pageSize));
 
@@ -405,6 +427,12 @@ export class MissionControlView extends LitElement {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
+  private renderToolStatusBadge(isError: boolean) {
+    return html`
+      <span class="badge ${isError ? "badge--danger" : "badge--ok"}">${isError ? "Error" : "OK"}</span>
+    `;
+  }
+
   private renderRow(label: string, value: unknown) {
     return html`
       <div class="mc-row">
@@ -461,7 +489,11 @@ export class MissionControlView extends LitElement {
 
     if (this.isRecord(value)) {
       const entries = Object.entries(value);
-      if (!entries.length) return "{}";
+      const isToolObject = typeof value.isError === "boolean";
+      const visibleEntries = isToolObject ? entries.filter(([entryKey]) => entryKey !== "isError") : entries;
+      if (!visibleEntries.length && !isToolObject) return "{}";
+
+      const nestedRows = visibleEntries.map(([entryKey, entryValue]) => this.renderRow(entryKey, this.renderStructuredValue(entryValue, `${key}:${entryKey}`)));
       return html`
         <details
           class="mc-details"
@@ -469,8 +501,9 @@ export class MissionControlView extends LitElement {
           @toggle=${(event: Event) => this.toggleDetail(`${key}:object`, (event.currentTarget as HTMLDetailsElement).open)}
         >
           <summary>Object (${entries.length})</summary>
+          ${isToolObject ? html`<div class="mc-nested-grid">${this.renderRow("Status", this.renderToolStatusBadge(Boolean(value.isError)))}</div>` : nothing}
           <div class="mc-nested-grid">
-            ${entries.map(([entryKey, entryValue]) => this.renderRow(entryKey, this.renderStructuredValue(entryValue, `${key}:${entryKey}`)))}
+            ${nestedRows}
           </div>
         </details>
       `;
@@ -485,6 +518,20 @@ export class MissionControlView extends LitElement {
     const baseKey = `event:${event.id || `${event.runId || "-"}:${event.timestamp || "-"}`}`;
     const parsed = this.normalizeEventData(event.data);
 
+    const eventDetails = this.isRecord(parsed)
+      ? (() => {
+        const isToolObject = typeof parsed.isError === "boolean";
+        const entries = Object.entries(parsed).filter(([k]) => !(isToolObject && k === "isError"));
+
+        return html`
+          <div class="mc-nested-grid">
+            ${isToolObject ? this.renderRow("Status", this.renderToolStatusBadge(Boolean(parsed.isError))) : nothing}
+            ${entries.map(([k, v]) => this.renderRow(k, this.renderStructuredValue(v, `${baseKey}:${k}`)))}
+          </div>
+        `;
+      })()
+      : this.renderTextDetails(parsed, "Details", `${baseKey}:details`);
+
     return html`
       <article class="mc-nested-item">
         <header class="mc-nested-item__header">
@@ -494,9 +541,7 @@ export class MissionControlView extends LitElement {
 
         ${event.description ? html`<p class="mc-description">${event.description}</p>` : nothing}
 
-        ${this.isRecord(parsed)
-          ? html`<div class="mc-nested-grid">${Object.entries(parsed).map(([k, v]) => this.renderRow(k, this.renderStructuredValue(v, `${baseKey}:${k}`)))}</div>`
-          : this.renderTextDetails(parsed, "Details", `${baseKey}:details`)}
+        ${eventDetails}
       </article>
     `;
   }

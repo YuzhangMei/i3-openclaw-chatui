@@ -501,7 +501,7 @@ export class OpenClawApp extends LitElement {
         `;
       case "missionControl":
         return html`
-          <mission-control-view></mission-control-view>
+          <mission-control-view .gatewayUrl=${this.gatewayUrl}></mission-control-view>
         `;
       default:
         return nothing;
