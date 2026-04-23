@@ -1,14 +1,24 @@
 import { LitElement, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { GatewayClient, type ConnectionState } from "./gateway-client.js";
-import type { ChatEventPayload } from "./types.js";
+import type {
+  AutonomyLevel,
+  ChatEventPayload,
+  ElevatedLevel,
+  ExecAsk,
+  ExecHost,
+  ExecSecurity,
+  ExecutionMode,
+  ReasoningLevel,
+} from "./types.js";
 import { uuid } from "./uuid.js";
 import "./views/chat-view.js";
 import "./views/overview-view.js";
 import "./views/logs-view.js";
+import "./views/protocol-probe-view.js";
 import "./mission-control.js";
 
-type Tab = "chat" | "overview" | "logs" | "missionControl";
+type Tab = "chat" | "overview" | "logs" | "protocolProbe" | "missionControl";
 
 interface ChatMessage {
   id: string;
@@ -30,7 +40,24 @@ interface SessionRow {
   status?: string;
   totalTokens?: number;
   model?: string;
+  thinkingLevel?: string;
+  verboseLevel?: string;
+  reasoningLevel?: ReasoningLevel;
+  elevatedLevel?: ElevatedLevel;
+  execHost?: ExecHost;
+  execSecurity?: ExecSecurity;
+  execAsk?: ExecAsk;
 }
+
+type SessionPresetPatch = {
+  thinkingLevel?: string | null;
+  verboseLevel?: string | null;
+  reasoningLevel?: ReasoningLevel | null;
+  elevatedLevel?: ElevatedLevel | null;
+  execHost?: ExecHost | null;
+  execSecurity?: ExecSecurity | null;
+  execAsk?: ExecAsk | null;
+};
 
 type SessionGroup = { label: string; sessions: SessionRow[] };
 
@@ -67,6 +94,30 @@ function sessionTitle(s: SessionRow): string {
   return last;
 }
 
+function autoModePatch(): SessionPresetPatch {
+  return {
+    thinkingLevel: "low",
+    verboseLevel: "on",
+    reasoningLevel: "on",
+    elevatedLevel: "on",
+    execHost: "gateway",
+    execSecurity: "allowlist",
+    execAsk: "off",
+  };
+}
+
+function manualModePatch(): SessionPresetPatch {
+  return {
+    thinkingLevel: null,
+    verboseLevel: null,
+    reasoningLevel: null,
+    elevatedLevel: null,
+    execHost: null,
+    execSecurity: null,
+    execAsk: null,
+  };
+}
+
 @customElement("openclaw-app")
 export class OpenClawApp extends LitElement {
   @state() connectionState: ConnectionState = "disconnected";
@@ -83,6 +134,10 @@ export class OpenClawApp extends LitElement {
   @state() chatStreamRunId = "";
   @state() chatLoading = false;
   @state() chatRunning = false;
+  @state() executionMode: ExecutionMode = "manual";
+  @state() modePersistenceState: "idle" | "saving" | "saved" | "unsupported" | "error" = "idle";
+  @state() autonomyLevel: AutonomyLevel = "unknown";
+  @state() autonomyState: "idle" | "saving" | "saved" | "error" = "idle";
 
   @state() sessions: SessionRow[] = [];
 
@@ -152,6 +207,10 @@ export class OpenClawApp extends LitElement {
       const list = result?.sessions ?? [];
       list.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
       this.sessions = list;
+      const activeSession = list.find((s) => s.key === this.client.sessionKey);
+      if (activeSession) {
+        this.executionMode = this.sessionExecutionMode(activeSession);
+      }
     } catch { /* ignore */ }
   }
 
@@ -213,7 +272,7 @@ export class OpenClawApp extends LitElement {
     }
   }
 
-  async handleSendChat(text: string) {
+  async handleSendChat(text: string): Promise<boolean> {
     const userMsg: ChatMessage = {
       id: uuid(),
       role: "user",
@@ -225,6 +284,7 @@ export class OpenClawApp extends LitElement {
     this.chatStream = "";
     try {
       await this.client.sendChat(text);
+      return true;
     } catch (err) {
       this.chatRunning = false;
       const errMsg: ChatMessage = {
@@ -234,6 +294,7 @@ export class OpenClawApp extends LitElement {
         timestamp: Date.now(),
       };
       this.chatMessages = [...this.chatMessages, errMsg];
+      return false;
     }
   }
 
@@ -251,8 +312,11 @@ export class OpenClawApp extends LitElement {
         this.chatMessages = [];
         this.chatStream = "";
         this.chatRunning = false;
+        this.autonomyLevel = "unknown";
+        this.autonomyState = "idle";
         this.tab = "chat";
         this.mobileNavOpen = false;
+        await this.persistExecutionMode(this.executionMode, result.key);
         this.loadSessions();
         return;
       }
@@ -268,6 +332,8 @@ export class OpenClawApp extends LitElement {
     this.chatStream = "";
     this.chatRunning = false;
     this.chatLoading = false;
+    this.autonomyLevel = "unknown";
+    this.autonomyState = "idle";
     this.tab = "chat";
     this.mobileNavOpen = false;
   }
@@ -282,9 +348,112 @@ export class OpenClawApp extends LitElement {
     this.chatMessages = [];
     this.chatStream = "";
     this.chatRunning = false;
+    const nextSession = this.sessions.find((s) => s.key === key);
+    this.executionMode = nextSession ? this.sessionExecutionMode(nextSession) : "manual";
+    this.autonomyLevel = "unknown";
+    this.autonomyState = "idle";
     this.tab = "chat";
     this.mobileNavOpen = false;
     await this.loadChatHistory();
+  }
+
+  private sessionExecutionMode(session: SessionRow): ExecutionMode {
+    if (
+      session.thinkingLevel === "low" &&
+      session.verboseLevel === "on" &&
+      session.reasoningLevel === "on" &&
+      session.elevatedLevel === "on" &&
+      session.execHost === "gateway" &&
+      session.execSecurity === "allowlist" &&
+      session.execAsk === "off"
+    ) {
+      return "auto";
+    }
+    return "manual";
+  }
+
+  private async handleExecutionModeChange(mode: ExecutionMode) {
+    if (mode === this.executionMode) return;
+    this.executionMode = mode;
+    await this.persistExecutionMode(mode);
+  }
+
+  private async handleAutonomyChange(level: AutonomyLevel) {
+    if (level === "unknown" || this.chatRunning) return;
+    this.autonomyLevel = level;
+    this.autonomyState = "saving";
+    const sent = await this.handleSendChat(`/autonomy ${level}`);
+    if (sent) {
+      this.autonomyState = "saved";
+    } else {
+      this.autonomyState = "error";
+    }
+  }
+
+  private async persistExecutionMode(mode: ExecutionMode, sessionKey = this.client.sessionKey) {
+    if (!sessionKey) return;
+    this.modePersistenceState = "saving";
+    const patch = mode === "auto" ? autoModePatch() : manualModePatch();
+    try {
+      await this.client.patchSession(sessionKey, {
+        key: sessionKey,
+        ...patch,
+      });
+      this.modePersistenceState = "saved";
+      if (mode === "manual") {
+        this.autonomyLevel = "unknown";
+      }
+      this.sessions = this.sessions.map((session) =>
+        session.key === sessionKey
+          ? {
+              ...session,
+              ...Object.fromEntries(
+                Object.entries(patch).map(([entryKey, entryValue]) => [
+                  entryKey,
+                  entryValue === null ? undefined : entryValue,
+                ])
+              ),
+            }
+          : session
+      );
+    } catch (error) {
+      console.warn("Failed to persist execution mode:", error);
+      this.modePersistenceState = /webchat clients cannot patch sessions|unknown|unsupported|not found|patch/i.test(
+        error instanceof Error ? error.message : String(error)
+      )
+        ? "unsupported"
+        : "error";
+    }
+  }
+
+  private modeStatusText() {
+    switch (this.modePersistenceState) {
+      case "saving":
+        return "Saving mode";
+      case "saved":
+        return "Mode saved";
+      case "unsupported":
+        return "Gateway rejected session preset";
+      case "error":
+        return "Mode not saved";
+      default:
+        return this.executionMode === "auto"
+          ? "Auto preset uses the remote gateway's verified autonomy-safe fields"
+          : "Manual preset uses default session behavior";
+    }
+  }
+
+  private autonomyStatusText() {
+    switch (this.autonomyState) {
+      case "saving":
+        return "Sending /autonomy command";
+      case "saved":
+        return "Autonomy command sent";
+      case "error":
+        return "Autonomy command failed";
+      default:
+        return "Command-driven autonomy level";
+    }
   }
 
   private extractMessageText(m: ChatMessage): string {
@@ -399,6 +568,12 @@ export class OpenClawApp extends LitElement {
             </button>
           </div>
 
+          <div class="nav__mode-pill">
+            <span class="badge ${this.executionMode === "auto" ? "badge--warn" : ""}">
+              ${this.executionMode === "auto" ? "AUTO" : "MANUAL"}
+            </span>
+          </div>
+
           <div class="nav__sessions">
             ${this.renderSessionList()}
           </div>
@@ -415,6 +590,11 @@ export class OpenClawApp extends LitElement {
               @click=${() => this.setTab("logs")}>
               <span class="nav__item-icon">📜</span>
               <span class="nav__item-label">Logs</span>
+            </button>
+            <button class="nav__item ${this.tab === "protocolProbe" ? "nav__item--active" : ""}"
+              @click=${() => this.setTab("protocolProbe")}>
+              <span class="nav__item-icon">🧪</span>
+              <span class="nav__item-label">Protocol Probe</span>
             </button>
             <button class="nav__item ${this.tab === "missionControl" ? "nav__item--active" : ""}"
               @click=${() => this.setTab("missionControl")}>
@@ -464,6 +644,9 @@ export class OpenClawApp extends LitElement {
             title=${s.key}
           >
             <span class="nav__session-title">${sessionTitle(s)}</span>
+            ${this.sessionExecutionMode(s) === "auto"
+              ? html`<span class="nav__session-badge">AUTO</span>`
+              : nothing}
             ${s.status === "running" ? html`<span class="nav__session-running"></span>` : nothing}
           </button>
         `)}
@@ -485,6 +668,12 @@ export class OpenClawApp extends LitElement {
             @send-chat=${(e: CustomEvent) => this.handleSendChat(e.detail)}
             @abort-chat=${() => this.handleAbortChat()}
             @new-session=${() => this.handleNewChat()}
+            .executionMode=${this.executionMode}
+            .modeStatus=${this.modeStatusText()}
+            .autonomyLevel=${this.autonomyLevel}
+            .autonomyStatus=${this.autonomyStatusText()}
+            @execution-mode-change=${(e: CustomEvent<ExecutionMode>) => this.handleExecutionModeChange(e.detail)}
+            @autonomy-change=${(e: CustomEvent<AutonomyLevel>) => this.handleAutonomyChange(e.detail)}
           ></chat-view>
         `;
       case "overview":
@@ -498,6 +687,14 @@ export class OpenClawApp extends LitElement {
       case "logs":
         return html`
           <logs-view .client=${this.client}></logs-view>
+        `;
+      case "protocolProbe":
+        return html`
+          <protocol-probe-view
+            .client=${this.client}
+            .connectionState=${this.connectionState}
+            .sessionKey=${this.client.sessionKey}
+          ></protocol-probe-view>
         `;
       case "missionControl":
         return html`

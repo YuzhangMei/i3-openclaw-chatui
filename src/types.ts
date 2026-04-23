@@ -45,6 +45,15 @@ export interface ConnectParams {
   locale: string;
 }
 
+export type ExecutionMode = "manual" | "auto";
+export type AutonomyLevel = "off" | "low" | "medium" | "high" | "unknown";
+
+export type ReasoningLevel = "off" | "on" | "stream";
+export type ElevatedLevel = "off" | "on" | "ask" | "full";
+export type ExecHost = "sandbox" | "gateway" | "node";
+export type ExecSecurity = "deny" | "allowlist" | "full";
+export type ExecAsk = "off" | "on-miss" | "always";
+
 export interface HelloOkPayload {
   type: "hello-ok";
   protocol: number;
@@ -64,6 +73,7 @@ export interface ChatSendParams {
   message: string;
   deliver: boolean;
   idempotencyKey: string;
+  thinking?: string;
 }
 
 export interface ChatEventPayload {

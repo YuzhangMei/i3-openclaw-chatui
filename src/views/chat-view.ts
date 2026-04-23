@@ -2,6 +2,7 @@ import { LitElement, html, nothing } from "lit";
 import { customElement, property, state, query } from "lit/decorators.js";
 import { Marked } from "marked";
 import DOMPurify from "dompurify";
+import type { AutonomyLevel, ExecutionMode } from "../types.js";
 
 const marked = new Marked();
 
@@ -43,6 +44,10 @@ export class ChatView extends LitElement {
   @property({ type: Boolean }) running = false;
   @property({ type: Boolean }) connected = false;
   @property({ type: String }) sessionKey = "";
+  @property({ type: String }) executionMode: ExecutionMode = "manual";
+  @property({ type: String }) modeStatus = "";
+  @property({ type: String }) autonomyLevel: AutonomyLevel = "unknown";
+  @property({ type: String }) autonomyStatus = "";
 
   @state() private draft = "";
   @query("#chat-thread") private threadEl!: HTMLElement;
@@ -92,18 +97,81 @@ export class ChatView extends LitElement {
     ta.style.height = Math.min(ta.scrollHeight, 150) + "px";
   }
 
+  private handleModeChange(mode: ExecutionMode) {
+    this.dispatchEvent(new CustomEvent("execution-mode-change", {
+      detail: mode,
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  private handleAutonomyChange(level: AutonomyLevel) {
+    if (level === "unknown") return;
+    this.dispatchEvent(new CustomEvent("autonomy-change", {
+      detail: level,
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   render() {
     return html`
       <div class="chat-layout">
         <div class="chat-layout__header">
           <div class="chat-layout__session-info">
             <span class="chat-layout__session-label">${this.sessionKey}</span>
+            <span class="badge ${this.executionMode === "auto" ? "badge--warn" : ""}">
+              ${this.executionMode === "auto" ? "AUTO" : "MANUAL"}
+            </span>
           </div>
-          <div class="chat-layout__actions">
+          <div class="chat-layout__actions chat-layout__actions--split">
+            <div class="mode-toggle" role="group" aria-label="Execution mode">
+              <button
+                class="mode-toggle__button ${this.executionMode === "manual" ? "mode-toggle__button--active" : ""}"
+                @click=${() => this.handleModeChange("manual")}
+              >Manual</button>
+              <button
+                class="mode-toggle__button ${this.executionMode === "auto" ? "mode-toggle__button--active" : ""}"
+                @click=${() => this.handleModeChange("auto")}
+              >Auto</button>
+            </div>
+            <label class="autonomy-control">
+              <span class="autonomy-control__label">Autonomy</span>
+              <select
+                class="field__select autonomy-control__select"
+                .value=${this.autonomyLevel === "unknown" ? "" : this.autonomyLevel}
+                @change=${(e: Event) => this.handleAutonomyChange((e.target as HTMLSelectElement).value as AutonomyLevel)}
+              >
+                <option value="">Not set</option>
+                <option value="off">Off</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
             <button class="btn btn--ghost btn--sm" title="New session"
               @click=${() => this.dispatchEvent(new CustomEvent("new-session"))}>
               + New
             </button>
+          </div>
+        </div>
+
+        <div class="chat-mode-banner ${this.executionMode === "auto" ? "chat-mode-banner--auto" : ""}">
+          <div class="chat-mode-banner__title">
+            ${this.executionMode === "auto" ? "Auto mode is enabled" : "Manual mode is enabled"}
+          </div>
+          <div class="chat-mode-banner__text">
+            ${this.executionMode === "auto"
+              ? "This applies a verified session preset with lower exec friction and stronger autonomy defaults."
+              : "This uses the gateway's default session settings without forcing elevated automation."}
+            ${this.modeStatus ? html` <span class="chat-mode-banner__status">${this.modeStatus}</span>` : nothing}
+          </div>
+          <div class="chat-mode-banner__text">
+            Autonomy:
+            <span class="chat-mode-banner__status">
+              ${this.autonomyLevel === "unknown" ? "not set from UI" : this.autonomyLevel}
+            </span>
+            ${this.autonomyStatus ? html` <span class="chat-mode-banner__status">${this.autonomyStatus}</span>` : nothing}
           </div>
         </div>
 

@@ -252,7 +252,7 @@ export class GatewayClient {
       minProtocol: 3,
       maxProtocol: 3,
       client: {
-        id: "webchat-ui",
+        id: "openclaw-control-ui",
         version: "0.1.0",
         platform: "web",
         mode: "webchat",
